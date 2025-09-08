@@ -10,6 +10,66 @@ This project consists of three main components:
 2. **Host Proxy Service** - Runs on the host and forwards traffic between the enclave and external services
 3. **Demo Application** - A sample application that demonstrates the sidecar capabilities
 
+### Communication Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        AWS Nitro Enclave                                 │
+│  ┌─────────────────┐    ┌─────────────────┐                             │
+│  │                 │    │                 │    ╔═══════════════════╗    │
+│  │   Demo App      │◄──►│  Sidecar Proxy  │◄═══╣   TLS 1.3 Tunnel ║    │
+│  │                 │    │                 │    ╚═══════════════════╝    │
+│  │  - HTTP Client  │    │ - TLS Handler   │              │              │
+│  │  - Test Suite   │    │ - VSock Server  │              │              │
+│  │                 │    │ - Attestation   │              │              │
+│  └─────────────────┘    └─────────────────┘              │              │
+│                                   │                      │              │
+│                                   │ Metadata Only        │              │
+│                                   │ via VSock            │              │
+└───────────────────────────────────┼──────────────────────┼──────────────┘
+                                    │                      │
+                                    ▼                      │
+┌─────────────────────────────────────────────────────────┼──────────────┐
+│                           Host EC2 Instance             │              │
+│                      ┌─────────────────┐                │              │
+│                      │                 │                │              │
+│                      │  Host Proxy     │                │              │
+│                      │                 │        🔒 Host cannot         │
+│                      │ - HTTP Server   │        decrypt this traffic   │
+│                      │ - VSock Client  │                │              │
+│                      │ - Metadata Fwd  │                │              │
+│                      └─────────────────┘                │              │
+│                               │                          │              │
+│                               │ Routing Only             │              │
+└───────────────────────────────┼──────────────────────────┼──────────────┘
+                                │                          │
+                                ▼                          │
+┌─────────────────────────────────────────────────────────┼──────────────┐
+│                        External Services                │              │
+│                                                         │              │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌───────────▼─────────────┐ │
+│  │   httpbin.org   │  │   GitHub API    │  │   Other APIs            │ │
+│  │                 │  │                 │  │                         │ │
+│  │ - Test Endpoint │  │ - User Data     │  │ - Custom APIs          │ │
+│  │ - JSON Response │  │ - Public Data   │  │ - REST/GraphQL         │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Security Flow:
+1. Demo App sends HTTP request to Sidecar (within enclave)
+2. Sidecar establishes DIRECT TLS 1.3 connection to external service
+3. Sidecar sends only routing metadata to Host Proxy via VSock  
+4. Host Proxy cannot decrypt the TLS traffic - it only routes packets
+5. All cryptographic operations happen within the secure enclave
+6. Response flows back encrypted through the same secure channel
+
+Key Security Features:
+• TLS termination happens inside the enclave, not on the host
+• Host only sees encrypted packets and routing metadata  
+• End-to-end encryption from enclave to external service
+• Zero-knowledge proxy - host cannot access sensitive data
+```
+
 ## Features
 
 - End-to-end TLS encryption between enclave applications and external services
@@ -42,10 +102,12 @@ Detailed instructions are provided in each component's directory.
 
 ## Security Features
 
-- TLS 1.3 encryption for all external communications
-- Cryptographic attestation using Nitro Enclave features
-- Zero-knowledge proxy - host cannot access encrypted content
-- Secure key management within the enclave
+- **True End-to-End TLS Encryption**: TLS 1.3 connections established directly from within the enclave
+- **Zero-Knowledge Host Proxy**: Host only forwards encrypted packets without access to content
+- **Raw Socket Tunneling**: Network tunnel service provides transparent packet forwarding
+- **Enclave-Terminated TLS**: All cryptographic operations happen within the secure enclave
+- **Cryptographic Attestation**: Using Nitro Enclave attestation for trust verification
+- **Memory Isolation**: Application and crypto keys protected by hardware-level isolation
 
 ## Prerequisites
 

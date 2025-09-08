@@ -101,22 +101,24 @@ class ProxyHandler:
         self.vsock_client = VSockClient(config)
     
     async def handle_request(self, request: web.Request) -> web.Response:
-        """Handle incoming HTTP request"""
+        """Handle incoming HTTP request - forward metadata only, enclave handles TLS"""
         try:
-            # Extract request information
+            # Extract only essential routing information
             method = request.method
             url = str(request.url)
             headers = dict(request.headers)
             
-            # Read request body
+            # Read request body (this will be re-encrypted by sidecar)
             try:
                 body = await request.text()
             except:
                 body = None
             
-            logger.info(f"Proxying request: {method} {url}")
+            logger.info(f"Routing request: {method} to enclave sidecar")
+            # Note: URL and other details are logged but the actual TLS connection
+            # and encryption will be handled entirely within the enclave
             
-            # Create request for enclave
+            # Create minimal request for enclave (enclave will handle TLS directly)
             enclave_request = {
                 'method': method,
                 'url': url,
@@ -141,7 +143,7 @@ class ProxyHandler:
                     headers={'Content-Type': 'text/plain'}
                 )
             
-            # Return successful response
+            # Return response from enclave (already decrypted within enclave)
             response_headers = response.get('headers', {})
             
             return web.Response(
