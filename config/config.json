@@ -1,0 +1,41 @@
+{
+  "enclave": {
+    "cid": 3,
+    "port": 5000,
+    "memory_mb": 512,
+    "cpu_count": 1,
+    "debug_mode": true
+  },
+  "host_proxy": {
+    "port": 8080,
+    "max_retries": 3,
+    "retry_delay": 1.0,
+    "timeout": 30
+  },
+  "tls": {
+    "min_version": "TLSv1.3",
+    "verify_certificates": true,
+    "cipher_suites": [
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "TLS_AES_128_GCM_SHA256"
+    ]
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "/app/logs/sidecar.log",
+    "max_size": "10MB",
+    "backup_count": 5
+  },
+  "demo": {
+    "test_endpoints": [
+      "https://httpbin.org/get",
+      "https://httpbin.org/post",
+      "https://jsonplaceholder.typicode.com/posts/1",
+      "https://api.github.com/users/github"
+    ],
+    "request_timeout": 10,
+    "concurrent_requests": 4
+  }
+}

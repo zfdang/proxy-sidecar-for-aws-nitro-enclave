@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # Host proxy service
+  host-proxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.host
+    ports:
+      - "8080:8080"
+    environment:
+      - LOG_LEVEL=INFO
+      - ENCLAVE_CID=3
+      - ENCLAVE_PORT=5000
+    volumes:
+      - ../logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Demo client (optional, for testing)
+  demo-client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.client
+    depends_on:
+      - host-proxy
+    environment:
+      - PROXY_URL=http://host-proxy:8080
+    volumes:
+      - ../logs:/app/logs
+    command: ["python", "-m", "src.demo_app.main"]
