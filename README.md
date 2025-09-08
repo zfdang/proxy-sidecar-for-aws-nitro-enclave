@@ -98,7 +98,9 @@ Key Security Features:
 3. Launch the enclave with the sidecar
 4. Run the demo application
 
-Detailed instructions are provided in each component's directory.
+**📖 Detailed instructions:**
+- **English**: See [USAGE_EN.md](USAGE_EN.md) for comprehensive usage guide
+- **中文**: See [USAGE.md](USAGE.md) for detailed Chinese documentation
 
 ## Security Features
 
