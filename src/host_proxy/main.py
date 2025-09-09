@@ -141,8 +141,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
             
             # Extract request information
-            url = self.path
             headers = dict(self.headers)
+            
+            # Get target URL from headers (set by demo client)
+            target_url = headers.get('X-Target-URL', self.path)
             
             # Read request body if present
             body = None
@@ -150,14 +152,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 content_length = int(headers['Content-Length'])
                 body = self.rfile.read(content_length).decode('utf-8')
             
-            logger.info(f"Routing request: {method} to enclave sidecar")
+            logger.info(f"Routing request: {method} {target_url} to enclave sidecar")
             # Note: URL and other details are logged but the actual TLS connection
             # and encryption will be handled entirely within the enclave
             
             # Create minimal request for enclave (enclave will handle TLS directly)
             enclave_request = {
                 'method': method,
-                'url': url,
+                'url': target_url,
                 'headers': headers,
                 'body': body
             }

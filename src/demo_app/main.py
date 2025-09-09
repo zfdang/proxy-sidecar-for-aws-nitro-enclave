@@ -48,12 +48,12 @@ class SecureHttpClient:
         """Make a request through the sidecar proxy"""
         # The proxy will handle the actual TLS connection to the external service
         # The request URL becomes the target URL that the proxy will forward to
-        proxy_headers = kwargs.get('headers', {})
+        proxy_headers = kwargs.get('headers') or {}
         proxy_headers['X-Target-URL'] = url
         kwargs['headers'] = proxy_headers
         
         # Make request to the local proxy, which will forward to the external service
-        return self.session.request(method, url, **kwargs)
+        return self.session.request(method, self.proxy_url, **kwargs)
 
 class DemoTestSuite:
     """Test suite demonstrating various sidecar capabilities"""
