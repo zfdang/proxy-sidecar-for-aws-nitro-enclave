@@ -11,9 +11,8 @@ import logging
 from typing import Dict, Any, Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
-from urllib.parse import urlparse
-import aiohttp
-from aiohttp import web
+from urllib.parse import urlparse, parse_qs
+from socketserver import ThreadingMixIn
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -93,26 +92,63 @@ class VSockClient:
             await self.disconnect()
             return None
 
-class ProxyHandler:
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP Server that can handle requests in separate threads"""
+    daemon_threads = True
+
+class ProxyHandler(BaseHTTPRequestHandler):
     """HTTP request handler that forwards to enclave"""
     
-    def __init__(self, config: HostConfig):
-        self.config = config
-        self.vsock_client = VSockClient(config)
+    def __init__(self, *args, **kwargs):
+        self.config = HostConfig()
+        self.vsock_client = VSockClient(self.config)
+        super().__init__(*args, **kwargs)
     
-    async def handle_request(self, request: web.Request) -> web.Response:
+    def log_message(self, format, *args):
+        """Override to use our logger"""
+        logger.info(f"{self.address_string()} - {format % args}")
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        self._handle_request('GET')
+    
+    def do_POST(self):
+        """Handle POST requests"""
+        self._handle_request('POST')
+    
+    def do_PUT(self):
+        """Handle PUT requests"""
+        self._handle_request('PUT')
+    
+    def do_DELETE(self):
+        """Handle DELETE requests"""
+        self._handle_request('DELETE')
+    
+    def do_HEAD(self):
+        """Handle HEAD requests"""
+        self._handle_request('HEAD')
+    
+    def do_OPTIONS(self):
+        """Handle OPTIONS requests"""
+        self._handle_request('OPTIONS')
+    
+    def _handle_request(self, method: str):
         """Handle incoming HTTP request - forward metadata only, enclave handles TLS"""
         try:
-            # Extract only essential routing information
-            method = request.method
-            url = str(request.url)
-            headers = dict(request.headers)
+            # Handle health check
+            if self.path == '/health':
+                self._handle_health_check()
+                return
             
-            # Read request body (this will be re-encrypted by sidecar)
-            try:
-                body = await request.text()
-            except:
-                body = None
+            # Extract request information
+            url = self.path
+            headers = dict(self.headers)
+            
+            # Read request body if present
+            body = None
+            if 'Content-Length' in headers:
+                content_length = int(headers['Content-Length'])
+                body = self.rfile.read(content_length).decode('utf-8')
             
             logger.info(f"Routing request: {method} to enclave sidecar")
             # Note: URL and other details are logged but the actual TLS connection
@@ -127,145 +163,153 @@ class ProxyHandler:
             }
             
             # Send to enclave with retries
-            response = await self._send_with_retry(enclave_request)
+            response = self._send_with_retry(enclave_request)
             
             if response is None:
-                return web.Response(
-                    status=503,
-                    text='Service unavailable: Unable to connect to enclave',
-                    headers={'Content-Type': 'text/plain'}
-                )
+                self._send_error_response(503, 'Service unavailable: Unable to connect to enclave')
+                return
             
             if not response.get('success', False):
-                return web.Response(
-                    status=response.get('status', 500),
-                    text=response.get('error', 'Unknown error'),
-                    headers={'Content-Type': 'text/plain'}
-                )
+                error_msg = response.get('error', 'Unknown error')
+                status_code = response.get('status', 500)
+                self._send_error_response(status_code, error_msg)
+                return
             
-            # Return response from enclave (already decrypted within enclave)
-            response_headers = response.get('headers', {})
-            
-            return web.Response(
-                status=response.get('status', 200),
-                text=response.get('body', ''),
-                headers=response_headers
-            )
+            # Send successful response
+            self._send_success_response(response)
             
         except Exception as e:
             logger.error(f"Error handling request: {e}")
-            return web.Response(
-                status=500,
-                text=f'Internal proxy error: {str(e)}',
-                headers={'Content-Type': 'text/plain'}
-            )
+            self._send_error_response(500, f'Internal proxy error: {str(e)}')
     
-    async def _send_with_retry(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _send_with_retry(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Send request with retry logic"""
         last_error = None
         
         for attempt in range(self.config.MAX_RETRIES):
             try:
-                response = await self.vsock_client.send_request(request)
+                # Create new connection for each attempt
+                if not asyncio.get_event_loop().is_running():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                else:
+                    loop = asyncio.get_event_loop()
+                
+                # Run the async request in the event loop
+                response = loop.run_until_complete(self.vsock_client.send_request(request))
                 if response is not None:
                     return response
+                    
             except Exception as e:
                 last_error = e
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")
                 
                 if attempt < self.config.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.config.RETRY_DELAY)
+                    import time
+                    time.sleep(self.config.RETRY_DELAY)
         
         logger.error(f"All retry attempts failed. Last error: {last_error}")
         return None
     
-    async def handle_health_check(self, request: web.Request) -> web.Response:
+    def _handle_health_check(self):
         """Health check endpoint"""
         try:
+            # Create event loop if needed
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
             # Try to connect to enclave
-            if await self.vsock_client.connect():
-                await self.vsock_client.disconnect()
-                return web.Response(
-                    status=200,
-                    text='OK: Proxy and enclave are healthy',
-                    headers={'Content-Type': 'text/plain'}
-                )
+            connected = loop.run_until_complete(self.vsock_client.connect())
+            if connected:
+                loop.run_until_complete(self.vsock_client.disconnect())
+                self._send_text_response(200, 'OK: Proxy and enclave are healthy')
             else:
-                return web.Response(
-                    status=503,
-                    text='Unhealthy: Cannot connect to enclave',
-                    headers={'Content-Type': 'text/plain'}
-                )
+                self._send_text_response(503, 'Unhealthy: Cannot connect to enclave')
+                
         except Exception as e:
-            return web.Response(
-                status=503,
-                text=f'Unhealthy: {str(e)}',
-                headers={'Content-Type': 'text/plain'}
-            )
+            self._send_text_response(503, f'Unhealthy: {str(e)}')
+    
+    def _send_success_response(self, response: Dict[str, Any]):
+        """Send successful response from enclave"""
+        status_code = response.get('status', 200)
+        headers = response.get('headers', {})
+        body = response.get('body', '')
+        
+        self.send_response(status_code)
+        
+        # Send headers
+        for header, value in headers.items():
+            if header.lower() not in ['content-length', 'connection']:
+                self.send_header(header, value)
+        
+        # Send content
+        body_bytes = body.encode('utf-8')
+        self.send_header('Content-Length', str(len(body_bytes)))
+        self.send_header('Content-Type', headers.get('Content-Type', 'text/plain'))
+        self.end_headers()
+        
+        if body_bytes:
+            self.wfile.write(body_bytes)
+    
+    def _send_error_response(self, status_code: int, message: str):
+        """Send error response"""
+        self._send_text_response(status_code, message)
+    
+    def _send_text_response(self, status_code: int, message: str):
+        """Send plain text response"""
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'text/plain')
+        message_bytes = message.encode('utf-8')
+        self.send_header('Content-Length', str(len(message_bytes)))
+        self.end_headers()
+        self.wfile.write(message_bytes)
 
 class HostProxyService:
     """Main host proxy service"""
     
     def __init__(self):
         self.config = HostConfig()
-        self.handler = ProxyHandler(self.config)
-        self.app = None
-        self.runner = None
+        self.server = None
     
-    def setup_routes(self):
-        """Setup HTTP routes"""
-        self.app = web.Application()
-        
-        # Health check endpoint
-        self.app.router.add_get('/health', self.handler.handle_health_check)
-        
-        # Catch-all proxy route
-        self.app.router.add_route('*', '/{path:.*}', self.handler.handle_request)
-    
-    async def start(self):
+    def start(self):
         """Start the proxy service"""
         logger.info("Starting Host Proxy Service")
         
         try:
-            self.setup_routes()
-            
-            # Start the web server
-            self.runner = web.AppRunner(self.app)
-            await self.runner.setup()
-            
-            site = web.TCPSite(self.runner, '0.0.0.0', self.config.HTTP_PORT)
-            await site.start()
+            # Create HTTP server
+            server_address = ('0.0.0.0', self.config.HTTP_PORT)
+            self.server = ThreadedHTTPServer(server_address, ProxyHandler)
             
             logger.info(f"Host proxy listening on port {self.config.HTTP_PORT}")
             logger.info(f"Health check available at http://localhost:{self.config.HTTP_PORT}/health")
             
-            # Keep the service running
-            while True:
-                await asyncio.sleep(1)
-                
+            # Start serving requests
+            self.server.serve_forever()
+            
         except Exception as e:
             logger.error(f"Failed to start proxy service: {e}")
             raise
     
-    async def stop(self):
+    def stop(self):
         """Stop the proxy service"""
-        if self.runner:
-            await self.runner.cleanup()
-        
-        if self.handler.vsock_client:
-            await self.handler.vsock_client.disconnect()
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
         
         logger.info("Host proxy service stopped")
 
-async def main():
+def main():
     """Main entry point"""
     try:
         proxy = HostProxyService()
-        await proxy.start()
+        proxy.start()
     except KeyboardInterrupt:
         logger.info("Shutting down host proxy service")
         if 'proxy' in locals():
-            await proxy.stop()
+            proxy.stop()
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         return 1
@@ -273,4 +317,4 @@ async def main():
     return 0
 
 if __name__ == "__main__":
-    exit(asyncio.run(main()))
+    exit(main())
